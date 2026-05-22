@@ -18,6 +18,6 @@ local client, err = p4.new {
 
 assert(client, err)
 assert(client:connected() == false)
-assert(client:prog() == "p4.lua smoke test")
+assert(client.prog == "p4.lua smoke test")
 
 client:close()
