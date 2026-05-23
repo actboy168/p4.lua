@@ -22,7 +22,6 @@ P4 API 定义了以下 `ClientUser` 回调，部分尚未向 Lua 暴露：
 | 特性 | 优先级 | 说明 |
 |---|---|---|
 | `SetBreak` / KeepAlive | 低 | 中断正在执行的命令 |
-| `RunTag` / `WaitTag` | 低 | 异步执行命令 |
 
 ### 平台
 
