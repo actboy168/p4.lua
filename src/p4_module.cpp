@@ -28,8 +28,8 @@ StrBuf FormatError(const Error& error, int opts = EF_PLAIN) {
 
 class ResultCollector : public ClientUser {
 public:
-    explicit ResultCollector(lua_State* L, luaref refMgr, int input_ref = -1)
-        : L_(L), refMgr_(refMgr), input_ref_(input_ref) {
+    explicit ResultCollector(lua_State* L, luaref refMgr, int options_ref = -1)
+        : L_(L), refMgr_(refMgr), options_ref_(options_ref) {
         lua_createtable(L, 0, 8);
         lua_pushboolean(L, 1); lua_setfield(L, -2, "ok");
         lua_pushinteger(L, 0); lua_setfield(L, -2, "error_count");
@@ -130,12 +130,28 @@ public:
     }
 
     void InputData(StrBuf* strbuf, Error* e) override {
-        if (input_ref_ != -1) {
-            luaref_get(refMgr_, L_, input_ref_);
-            size_t len = 0;
-            const char* s = lua_tolstring(L_, -1, &len);
-            strbuf->Set(s);
-            lua_pop(L_, 1);
+        if (options_ref_ != -1) {
+            luaref_get(refMgr_, L_, options_ref_);
+            lua_getfield(L_, -1, "input");
+            if (lua_isstring(L_, -1)) {
+                size_t len = 0;
+                const char* s = lua_tolstring(L_, -1, &len);
+                strbuf->Set(s);
+            }
+            lua_pop(L_, 2);
+        }
+    }
+
+    void Prompt(const StrPtr& msg, StrBuf& rsp, int noEcho, Error* e) override {
+        if (options_ref_ != -1) {
+            luaref_get(refMgr_, L_, options_ref_);
+            lua_getfield(L_, -1, "prompt");
+            if (lua_isstring(L_, -1)) {
+                size_t len = 0;
+                const char* s = lua_tolstring(L_, -1, &len);
+                rsp.Set(s);
+            }
+            lua_pop(L_, 2);
         }
     }
 
@@ -172,7 +188,7 @@ private:
     lua_State* L_;
     luaref refMgr_;
     int ref_ = -1;
-    int input_ref_ = -1;
+    int options_ref_ = -1;
 };
 
 struct OptionDef {
@@ -260,7 +276,7 @@ public:
         return refMgr_;
     }
 
-    bool Run(std::string_view command, char** argv, int argc, lua_State* L, int input_ref = -1) {
+    bool Run(std::string_view command, char** argv, int argc, lua_State* L, int options_ref = -1) {
         if (command.empty()) {
             lua_pushnil(L);
             lua_pushliteral(L, "command must not be empty");
@@ -276,7 +292,7 @@ public:
 
         api_.SetArgv(argc, argv);
 
-        ResultCollector collector(L, refMgr_, input_ref);
+        ResultCollector collector(L, refMgr_, options_ref);
         api_.Run(command.data(), &collector);
         collector.Finalize(api_.GetErrors(), api_.GetFatals());
 
@@ -487,18 +503,14 @@ int ClientRun(lua_State* L) {
     int argc = 0;
     char** argv = ParseArguments(L, 3, &argc);
 
-    int input_ref = -1;
+    int options_ref = -1;
     if (!lua_isnoneornil(L, 4)) {
         luaL_checktype(L, 4, LUA_TTABLE);
-        lua_getfield(L, 4, "input");
-        if (lua_isstring(L, -1)) {
-            input_ref = luaref_ref(client->GetRefMgr(), L);
-        } else {
-            lua_pop(L, 1);
-        }
+        lua_pushvalue(L, 4);
+        options_ref = luaref_ref(client->GetRefMgr(), L);
     }
 
-    if (!client->Run(command, argv, argc, L, input_ref)) {
+    if (!client->Run(command, argv, argc, L, options_ref)) {
         delete[] argv;
         return 2;
     }

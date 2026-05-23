@@ -86,7 +86,7 @@ client:close()
 
 - `command`: P4 子命令名，如 `"info"`、`"changes"`、`"describe"`
 - `args`: 参数数组，如 `{ "-s" }`、`{ "-m", "10" }`
-- `options`: 可选 table，当前支持 `input`（字符串，提供 spec 表单数据）
+- `options`: 可选 table，`input` = spec 表单数据，`prompt` = 交互输入响应
 - 返回值: 结果 table，失败时返回 `nil, error_message`
 
 ```lua
@@ -98,6 +98,9 @@ local r = client:run("changes", { "-s", "submitted", "-m", "10" })
 
 -- p4 describe -s 12345
 local r = client:run("describe", { "-s", "12345" })
+
+-- p4 login (自动提供密码)
+local r = client:run("login", {}, { prompt = "mypassword" })
 
 -- p4 change -i / client -i (提交 spec 表单)
 local r = client:run("client", { "-o" })  -- 读取当前表单
