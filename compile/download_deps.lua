@@ -122,6 +122,22 @@ if not fs.exists(p4sdk_sentinel) then
     fs.create_directories(p4sdk_root)
     print("[1/2] extract  ", p4sdk_archive)
     extract_archive(p4sdk_archive, p4sdk_root)
+    -- flatten if archive has a single top-level directory
+    local dirs = {}
+    for entry in fs.pairs(p4sdk_root) do
+        if fs.is_directory(entry) then
+            dirs[#dirs + 1] = entry
+        else
+            dirs = {}
+            break
+        end
+    end
+    if #dirs == 1 then
+        for entry in fs.pairs(dirs[1]) do
+            fs.rename(entry, p4sdk_root / entry:filename())
+        end
+        fs.remove_all(dirs[1])
+    end
 else
     print("use cached ", p4sdk_sentinel)
 end

@@ -18,7 +18,7 @@ local client = assert(p4.new {
 })
 
 local result = client:run("info")
-if not result.ok then
+if result.errors then
     for _, e in ipairs(result.errors) do
         io.stderr:write(("[%d] %s\n"):format(e.code, e.message))
     end
@@ -26,9 +26,11 @@ if not result.ok then
     return
 end
 
-for _, stat in ipairs(result.stats) do
-    for k, v in pairs(stat) do
-        print(k .. " = " .. v)
+if result.stats then
+    for _, stat in ipairs(result.stats) do
+        for k, v in pairs(stat) do
+            print(k .. " = " .. v)
+        end
     end
 end
 
