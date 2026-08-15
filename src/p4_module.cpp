@@ -302,6 +302,7 @@ public:
 private:
     template <typename F>
     void CallCallback(int ref, F push_args, int nargs, int nresults = 0) {
+        push_args();
         int base = lua_gettop(L_) - nargs;
         lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
         lua_insert(L_, base + 1);
