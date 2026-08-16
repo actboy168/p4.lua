@@ -63,6 +63,7 @@ local function download(url, output)
         run {
             curl,
             "-L",
+            "-f",  -- HTTP 错误（如 404）时失败退出，不把错误页写入文件
             url,
             "-o",
             output,
@@ -70,7 +71,7 @@ local function download(url, output)
         return
     end
 
-    local downloader = platform.os == "macos" and { "curl", "--location", "-C", "-" } or "wget"
+    local downloader = platform.os == "macos" and { "curl", "--location", "--fail", "-C", "-" } or "wget"
     local cmd = {
         downloader,
         url,

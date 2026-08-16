@@ -1,7 +1,7 @@
 local cfg = {
     windows = {
         p4sdk   = "https://filehost.perforce.com/perforce/r26.1/bin.ntx64/p4api_vs2022_static_openssl3.5.zip",
-        openssl = "https://slproweb.com/download/Win64OpenSSL-3_5_6.exe",
+        openssl = "https://slproweb.com/download/Win64OpenSSL-3_5_7.exe",
     },
     linux = {
         p4sdk = "https://filehost.perforce.com/perforce/r26.1/bin.linux26x86_64/p4api-glibc2.3-openssl3.5.tgz",
