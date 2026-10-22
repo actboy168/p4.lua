@@ -34,14 +34,12 @@
 1. 下载依赖：
 
 ```powershell
-Set-Location E:\Github\p4.lua
 luamake lua compile\download_deps.lua
 ```
 
 2. 构建：
 
 ```powershell
-Set-Location E:\Github\p4.lua
 luamake
 ```
 
@@ -53,23 +51,20 @@ luamake
 在 Linux / WSL 下执行同一个命令：
 
 ```bash
-cd /mnt/e/Github/p4.lua
-/mnt/e/Github/luamake/luamake lua compile/download_deps.lua
-/mnt/e/Github/luamake/luamake
+luamake lua compile/download_deps.lua
+luamake
 ```
 
 ## 运行测试
 
 ```powershell
-Set-Location E:\Github\p4.lua
-E:\Github\luamake\luamake.exe lua test\load.lua
+luamake lua test\load.lua
 ```
 
 Linux / WSL：
 
 ```bash
-cd /mnt/e/Github/p4.lua
-/mnt/e/Github/luamake/luamake lua test/load.lua
+luamake lua test/load.lua
 ```
 
 ## 快速开始
@@ -99,14 +94,3 @@ print(result.error_count)
 
 - `examples\info.lua`
 
-## 目录结构
-
-```text
-make.lua
-README.md
-docs\
-src\
-examples\
-test\
-deps\
-```
