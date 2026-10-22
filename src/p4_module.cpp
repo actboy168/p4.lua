@@ -568,6 +568,15 @@ bool ConfigureFromTable(lua_State* L, int index, P4Client* client) {
 
         size_t val_len = 0;
         const char* val = lua_tolstring(L, -1, &val_len);
+        if (val == nullptr) {
+            const char* valtype = luaL_typename(L, -1);
+            lua_pop(L, 2);
+            lua_pushnil(L);
+            lua_pushfstring(L, "option '%.*s' must be a string, got %s",
+                            static_cast<int>(key_view.size()), key_view.data(),
+                            valtype);
+            return false;
+        }
         if (!client->Configure(key_view, {val, val_len}, L)) {
             lua_insert(L, -4);  // move error below k:  [table, error, k, v, nil]
             lua_insert(L, -4);  // move nil below error: [table, nil, error, k, v]
@@ -592,6 +601,14 @@ char** ParseArguments(lua_State* L, int index, int* argc) {
         lua_geti(L, index, i + 1);
         size_t len = 0;
         const char* s = lua_tolstring(L, -1, &len);
+        if (s == nullptr) {
+            const char* argtype = luaL_typename(L, -1);
+            delete[] argv;
+            lua_pop(L, 1);
+            luaL_error(L, "argument %d must be a string, got %s",
+                       static_cast<int>(i + 1), argtype);
+            return nullptr;  // unreachable, luaL_error never returns
+        }
         argv[i] = const_cast<char*>(s);
         lua_pop(L, 1);
     }
@@ -623,6 +640,10 @@ int ClientNewIndex(lua_State* L) {
     if (IsSupportedOption(key)) {
         size_t val_len = 0;
         const char* val = lua_tolstring(L, 3, &val_len);
+        if (val == nullptr) {
+            return luaL_error(L, "option '%s' must be a string, got %s",
+                              key, luaL_typename(L, 3));
+        }
         if (!client->Configure(key, {val, val_len}, L)) {
             return 2;
         }
