@@ -15,6 +15,8 @@
 #include "p4/ignore.h"
 #include "p4/strarray.h"
 #include "p4/mapapi.h"
+#include "p4/spec.h"
+#include "p4/strtable.h"
 #include "luaref.h"
 
 namespace {
@@ -30,6 +32,129 @@ StrBuf FormatError(const Error& error, int opts = EF_PLAIN) {
     }
     buffer.SetLength(len);
     return buffer;
+}
+
+bool LuaSpecValue(lua_State* L, int index, StrRef& value) {
+    int type = lua_type(L, index);
+    if (type != LUA_TSTRING && type != LUA_TNUMBER) {
+        return false;
+    }
+    size_t length = 0;
+    const char* text = lua_tolstring(L, index, &length);
+    value.Set(const_cast<char*>(text), static_cast<p4size_t>(length));
+    return true;
+}
+
+bool FillSpecList(lua_State* L, int index, const StrRef& field, StrBufDict& dict, Error* e) {
+    size_t count = lua_rawlen(L, index);
+    for (size_t i = 1; i <= count; ++i) {
+        lua_rawgeti(L, index, static_cast<lua_Integer>(i));
+        StrRef value;
+        if (!LuaSpecValue(L, -1, value)) {
+            e->Set(E_FAILED, "Spec input field '%field%' must contain strings") << field;
+            lua_pop(L, 1);
+            return false;
+        }
+        dict.SetVar(field, static_cast<int>(i - 1), value);
+        lua_pop(L, 1);
+    }
+
+    // Reject holes and non-integer keys; Spec::Format assumes a dense list.
+    size_t seen = 0;
+    lua_pushnil(L);
+    while (lua_next(L, index) != 0) {
+        bool valid = lua_isinteger(L, -2);
+        if (valid) {
+            lua_Integer key = lua_tointeger(L, -2);
+            valid = key >= 1 && static_cast<size_t>(key) <= count;
+        }
+        if (!valid) {
+            e->Set(E_FAILED, "Spec input field '%field%' must be a contiguous array") << field;
+            lua_pop(L, 2);
+            return false;
+        }
+        ++seen;
+        lua_pop(L, 1);
+    }
+    if (seen != count) {
+        e->Set(E_FAILED, "Spec input field '%field%' must be a contiguous array") << field;
+        return false;
+    }
+    return true;
+}
+
+bool FormatSpecInput(lua_State* L, int index, StrDict* vars, StrBuf* out, Error* e) {
+    out->Clear();
+    StrPtr* specdef = vars ? vars->GetVar("specdef") : nullptr;
+    if (!specdef) {
+        e->Set(E_FAILED, "Spec input requires a server-provided specdef");
+        return false;
+    }
+
+    Spec spec(specdef->Text(), "", e);
+    if (e->Test()) {
+        return false;
+    }
+
+    StrBufDict dict;
+    int base = lua_gettop(L);
+    int table = lua_absindex(L, index);
+    lua_pushnil(L);
+    while (lua_next(L, table) != 0) {
+        if (lua_type(L, -2) != LUA_TSTRING) {
+            e->Set(E_FAILED, "Spec input keys must be strings");
+            lua_settop(L, base);
+            return false;
+        }
+
+        size_t keyLength = 0;
+        const char* keyText = lua_tolstring(L, -2, &keyLength);
+        StrRef field(keyText, static_cast<p4size_t>(keyLength));
+        SpecElem* elem = spec.Find(field);
+        bool isList = elem && elem->IsList();
+        int valueType = lua_type(L, -1);
+
+        if (isList) {
+            if (valueType == LUA_TTABLE) {
+                if (!FillSpecList(L, lua_gettop(L), field, dict, e)) {
+                    lua_settop(L, base);
+                    return false;
+                }
+            } else {
+                StrRef value;
+                if (!LuaSpecValue(L, -1, value)) {
+                    e->Set(E_FAILED, "Spec input field '%field%' must be a string or array") << field;
+                    lua_settop(L, base);
+                    return false;
+                }
+                dict.SetVar(field, 0, value);
+            }
+        } else if (valueType == LUA_TTABLE) {
+            if (elem) {
+                e->Set(E_FAILED, "Spec input field '%field%' must be a string") << field;
+                lua_settop(L, base);
+                return false;
+            }
+            if (!FillSpecList(L, lua_gettop(L), field, dict, e)) {
+                lua_settop(L, base);
+                return false;
+            }
+        } else {
+            StrRef value;
+            if (!LuaSpecValue(L, -1, value)) {
+                e->Set(E_FAILED, "Spec input field '%field%' must be a string") << field;
+                lua_settop(L, base);
+                return false;
+            }
+            dict.SetVar(field, value);
+        }
+
+        lua_pop(L, 1);
+    }
+
+    SpecDataTable data(&dict);
+    spec.Format(&data, out);
+    return !e->Test();
 }
 
 void PushErrorMsgId(lua_State* L, Error* error) {
@@ -166,10 +291,13 @@ public:
     void InputData(StrBuf* strbuf, Error* e) override {
         if (options_ref_ != LUA_NOREF) {
             luaref_get(refMgr_, L_, options_ref_);
-            if (lua_getfield(L_, -1, "input") == LUA_TSTRING) {
+            int type = lua_getfield(L_, -1, "input");
+            if (type == LUA_TSTRING) {
                 size_t len = 0;
                 const char* s = lua_tolstring(L_, -1, &len);
                 strbuf->Set(s, static_cast<p4size_t>(len));
+            } else if (type == LUA_TTABLE) {
+                FormatSpecInput(L_, -1, varList, strbuf, e);
             }
             lua_pop(L_, 2);
         }
@@ -440,10 +568,13 @@ public:
     void InputData(StrBuf* strbuf, Error* e) override {
         if (on_input_ref_ == LUA_NOREF) return;
         CallCallback(on_input_ref_, []() {}, 0, 1);
-        if (lua_type(L_, -1) == LUA_TSTRING) {
+        int type = lua_type(L_, -1);
+        if (type == LUA_TSTRING) {
             size_t len = 0;
             const char* s = lua_tolstring(L_, -1, &len);
             strbuf->Set(s, static_cast<p4size_t>(len));
+        } else if (type == LUA_TTABLE) {
+            FormatSpecInput(L_, -1, varList, strbuf, e);
         }
         lua_pop(L_, 1);
     }

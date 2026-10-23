@@ -8,22 +8,22 @@
 
 目标：form 文本 ↔ 字段表。
 
-- 直接复用 SDK 的 `Spec` / `SpecData` / `SpecDataTable`；Lua 侧需要一个
-  `SpecData` 子类，把标量映射为 string、列表映射为 array。
-- specdef 缓存与内置回退；内置定义覆盖
-  `branch/change/client/depot/group/job/label/ldap/license/protect/remote/stream/user`。
-- 输出 tagged 结果时判断 `specdef` / `data` / `specFormatted`，必要时先解析 `data`；
-  处理时跳过 `func` / `specFormatted`。
-- form 文本 ↔ 字段表：
-  - 尾部数字/逗号是索引，前缀是基名。
-  - 缺失索引用空位补齐。
-  - 同名标量与列表冲突时，标量改名（追加 `s`）。
-  - `attr-` / `openattr-` 开头的键保持原样。
-- 原语：`parse_spec` / `format_spec` / `define_spec` / `spec_fields`。
-  `spec_fields` 返回字段的 type/opt/fmt/seq/values/presets 等元数据。
+已完成：
 
-缺口：`stats` 是扁平字符串表，`depotFile0` 原样保留；没有 `parse_spec` /
-`format_spec` / `spec_fields`。
+- `run` / `exec` / `try_exec` / `run_async` 的 `options.input` 支持 Lua 表；
+  由 binding 使用服务器 `specdef` + `Spec` / `SpecDataTable` 自动生成 form。
+- 支持标量、list 字段（`View` / `AltRoots` / `ChangeView`）和多行 text（`Description`）。
+- `p4sdk.connect` 启用 `specstring`，因此 `client -i`、`change -i` 等命令可直接传表。
+
+待实现：
+
+- `parse_spec` / `format_spec` / `spec_fields` / `define_spec`：form → 字段表、
+  字段元数据。
+- specdef 缓存与内置回退。
+- tagged 输出中 `specdef` / `data` / `specFormatted` 的处理；当前 `stats` 仍是
+  扁平字符串表，`depotFile0` 原样保留。
+- 反向解析仍需要 Lua 侧的 `SpecData` 实现；前向 table → form 已由
+  `StrBufDict` + `SpecDataTable` 覆盖。
 
 ### Resolver 与合并
 

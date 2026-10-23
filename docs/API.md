@@ -129,12 +129,27 @@ print(client.port)
 local r = client:run("info")
 local r = client:run("changes", { "-s", "submitted", "-m", "10" })
 
--- spec 表单输入
+-- spec 表单输入：string 原样传入
 local r = client:run("change", { "-i" }, { input = "Change: new\n..." })
+
+-- spec 表单输入：table 自动格式化为 form
+client:protocol("specstring", "")
+local r = client:run("client", { "-i" }, { input = {
+    Client = "foo",
+    Root = "C:/ws/foo",
+    View = { "//depot/... //foo/..." },
+} })
 
 -- 交互输入响应
 local r = client:run("login", {}, { prompt = "password" })
 ```
+
+`input` 可以是 string 或 table：
+
+- string 原样作为 form / stdin。
+- table 使用服务器 `specdef` + SDK `Spec` 自动格式化；需要先启用 `specstring` 协议（`p4sdk.connect` 会自动启用）。
+- table 只映射 `specdef` 中定义的字段；未知 key 会被忽略。
+- `options.input` 不是 table/string 时不会自动转换。
 
 ### `client:run_async(command[, args[, callbacks]])`
 
@@ -162,7 +177,7 @@ tag:wait()
 | `on_info` | `(level, data, msgid, dict, ids, is_message)` | 信息消息；`is_message` 区分 `ClientUser::Message` 和普通 `OutputInfo` |
 | `on_text` | `(text)` | 文本输出 |
 | `on_binary` | `(data)` | 二进制输出 |
-| `on_input` | `() → return "spec"` | spec 表单输入 |
+| `on_input` | `() → return "spec" or table` | spec 表单输入；table 需要 `specstring` |
 | `on_prompt` | `(msg, no_echo) → return "rsp"` | 交互输入 |
 | `on_progress_init` | `(kind)` | 操作类型，`CPT_*` 整数值 |
 | `on_progress_description` | `(description, units)` | 描述和单位，`CPU_*` 整数值 |

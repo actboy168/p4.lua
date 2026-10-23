@@ -167,14 +167,13 @@ p4 -p ssl:127.0.0.1:1666 -u alice -c myclient info
 
 - 查询类命令：`info`、`files`、`fstat`、`changes`、`users`、`clients`、`dirs`
 - 普通文本输出命令：`print`
-- 不需要人工交互的基础命令
+- 需要 `-i` 输入 spec 内容的命令，如 `change -i`、`client -i`（string 或 table 输入；table 需要先 `client:protocol("specstring", "")`，`p4sdk.connect` 会自动开启）
+- 不需要 resolve / merge 回调的基础命令
 
 ## 当前不适合哪些命令
 
 当前版本暂不适合：
 
-- 需要 `-i` 输入 spec 内容的命令，如 `change -i`、`client -i`
-- 需要交互式提示的命令
 - 需要 resolve / merge 回调的命令
 - 依赖当前尚未暴露高级 P4 API 回调能力的命令
 
