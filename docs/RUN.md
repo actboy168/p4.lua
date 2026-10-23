@@ -180,24 +180,33 @@ p4 -p ssl:127.0.0.1:1666 -u alice -c myclient info
 
 ## 返回值怎么看
 
-`client:run()` 返回的是一个 Lua table，例如：
+`client:run()` 返回的是一个 Lua table；字段按需惰性创建，没有对应数据时该字段不存在。
 
 ```lua
 local result = assert(client:run("info"))
 
-print(result.ok)
-print(result.error_count)
+-- 无错误时 result.errors 为 nil
+if result.errors then
+    for _, e in ipairs(result.errors) do
+        print(e.code, e.severity, e.msgid, e.message)
+    end
+end
 ```
 
 常用字段：
 
-- `ok`：命令是否成功
-- `error_count`：错误数量
+- `errors`：错误输出（无错误时为 `nil`）
+- `warnings`：警告输出
 - `info`：普通信息输出
 - `text`：文本输出
 - `binary`：二进制输出
-- `errors`：错误输出
-- `stats`：tagged / stat 类输出
+- `stats`：tagged / stat 类输出（需先调用 `client:protocol("tag", "")`）
+
+`errors` / `warnings` 的条目包含 `code`（generic `EV_*`）、`severity`、`message`、`msgid`（稳定消息 ID，可能为 `nil`）和 `dict`（消息参数，可能为 `nil`）。分类用 `msgid` / `code`，不要匹配 `message`。
+
+成功判断：`result.errors == nil`。
+
+默认连接不再自动设置 `tag` 协议；需要 `stats` 时先显式调用 `client:protocol("tag", "")`。
 
 ## 一个完整例子
 
@@ -213,6 +222,5 @@ local client = assert(p4.new {
 local info = assert(client:run("info", { "-s" }))
 local changes = assert(client:run("changes", { "-m", "5" }))
 
-print(info.ok, info.error_count)
-print(changes.ok, changes.error_count)
+print(info.errors == nil, changes.errors == nil)
 ```

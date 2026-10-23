@@ -9,6 +9,12 @@
 #include <string_view>
 
 #include "p4/clientapi.h"
+#include "p4/clientprog.h"
+#include "p4/enviro.h"
+#include "p4/hostenv.h"
+#include "p4/ignore.h"
+#include "p4/strarray.h"
+#include "p4/mapapi.h"
 #include "luaref.h"
 
 namespace {
@@ -26,23 +32,59 @@ StrBuf FormatError(const Error& error, int opts = EF_PLAIN) {
     return buffer;
 }
 
+void PushErrorMsgId(lua_State* L, Error* error) {
+    ErrorId* id = error ? error->GetId(0) : nullptr;
+    if (!id) {
+        lua_pushnil(L);
+        return;
+    }
+    lua_pushinteger(L, id->UniqueCode());
+}
+
+void PushErrorDict(lua_State* L, Error* error) {
+    StrDict* dict = error ? error->GetDict() : nullptr;
+    if (!dict) {
+        lua_pushnil(L);
+        return;
+    }
+    lua_createtable(L, 0, 0);
+    for (int index = 0;; ++index) {
+        StrRef key;
+        StrRef value;
+        if (!dict->GetVar(index, key, value)) break;
+        lua_pushlstring(L, key.Text(), static_cast<size_t>(key.Length()));
+        lua_pushlstring(L, value.Text(), static_cast<size_t>(value.Length()));
+        lua_rawset(L, -3);
+    }
+}
+
 class ResultCollector : public ClientUser {
 public:
-    explicit ResultCollector(lua_State* L, luaref refMgr, int options_ref = -1)
+    explicit ResultCollector(lua_State* L, luaref refMgr, int options_ref = LUA_NOREF)
         : L_(L), refMgr_(refMgr), options_ref_(options_ref) {
         lua_newtable(L);
         ref_ = luaref_ref(refMgr_, L);
+        if (ref_ == LUA_NOREF) {
+            lua_pop(L, 1);
+        }
     }
 
     ~ResultCollector() override {
-        if (ref_ != -1) {
+        if (ref_ != LUA_NOREF) {
             luaref_unref(refMgr_, ref_);
+        }
+        if (options_ref_ != LUA_NOREF) {
+            luaref_unref(refMgr_, options_ref_);
         }
     }
 
     int Release() {
+        if (ref_ == LUA_NOREF) {
+            lua_newtable(L_);
+            return 1;
+        }
         int ref = ref_;
-        ref_ = -1;
+        ref_ = LUA_NOREF;
         luaref_get(refMgr_, L_, ref);
         luaref_unref(refMgr_, ref);
         return 1;
@@ -51,7 +93,7 @@ public:
     void HandleError(Error* error) override {
         auto buf = FormatError(*error);
         EnsureField("errors");
-        PushError(error->GetGeneric(), error->GetSeverity(), buf.Text(), static_cast<size_t>(buf.Length()));
+        PushError(error, buf.Text(), static_cast<size_t>(buf.Length()));
         Append();
     }
 
@@ -63,11 +105,11 @@ public:
             Append();
         } else if (error->IsWarning()) {
             EnsureField("warnings");
-            PushError(error->GetGeneric(), 2, buf.Text(), static_cast<size_t>(buf.Length()));
+            PushError(error, buf.Text(), static_cast<size_t>(buf.Length()));
             Append();
         } else {
             EnsureField("errors");
-            PushError(error->GetGeneric(), error->GetSeverity(), buf.Text(), static_cast<size_t>(buf.Length()));
+            PushError(error, buf.Text(), static_cast<size_t>(buf.Length()));
             Append();
         }
     }
@@ -112,11 +154,10 @@ public:
     void InputData(StrBuf* strbuf, Error* e) override {
         if (options_ref_ != LUA_NOREF) {
             luaref_get(refMgr_, L_, options_ref_);
-            lua_getfield(L_, -1, "input");
-            if (lua_isstring(L_, -1)) {
+            if (lua_getfield(L_, -1, "input") == LUA_TSTRING) {
                 size_t len = 0;
                 const char* s = lua_tolstring(L_, -1, &len);
-                strbuf->Set(s);
+                strbuf->Set(s, static_cast<p4size_t>(len));
             }
             lua_pop(L_, 2);
         }
@@ -125,11 +166,10 @@ public:
     void Prompt(const StrPtr& msg, StrBuf& rsp, int noEcho, Error* e) override {
         if (options_ref_ != LUA_NOREF) {
             luaref_get(refMgr_, L_, options_ref_);
-            lua_getfield(L_, -1, "prompt");
-            if (lua_isstring(L_, -1)) {
+            if (lua_getfield(L_, -1, "prompt") == LUA_TSTRING) {
                 size_t len = 0;
                 const char* s = lua_tolstring(L_, -1, &len);
-                rsp.Set(s);
+                rsp.Set(s, static_cast<p4size_t>(len));
             }
             lua_pop(L_, 2);
         }
@@ -157,12 +197,14 @@ private:
         lua_pop(L_, 1);
     }
 
-    void PushError(int code, int severity, const char* msg, size_t len) {
+    void PushError(Error* error, const char* msg, size_t len) {
         while (len > 0 && msg[len - 1] == '\n') --len;
-        lua_createtable(L_, 0, 3);
-        lua_pushinteger(L_, code); lua_setfield(L_, -2, "code");
-        lua_pushinteger(L_, severity); lua_setfield(L_, -2, "severity");
+        lua_createtable(L_, 0, 5);
+        lua_pushinteger(L_, error->GetGeneric()); lua_setfield(L_, -2, "code");
+        lua_pushinteger(L_, error->GetSeverity()); lua_setfield(L_, -2, "severity");
         lua_pushlstring(L_, msg, len); lua_setfield(L_, -2, "message");
+        PushErrorMsgId(L_, error); lua_setfield(L_, -2, "msgid");
+        PushErrorDict(L_, error); lua_setfield(L_, -2, "dict");
     }
 
     void PushInfo(int level, const char* msg, size_t len) {
@@ -173,23 +215,125 @@ private:
 
     lua_State* L_;
     luaref refMgr_;
-    int ref_ = -1;
-    int options_ref_ = -1;
+    int ref_ = LUA_NOREF;
+    int options_ref_ = LUA_NOREF;
+};
+
+void UnrefCallback(luaref refMgr, int& ref) {
+    if (ref != LUA_NOREF) {
+        luaref_unref(refMgr, ref);
+        ref = LUA_NOREF;
+    }
+}
+
+struct ProgressRefs {
+    int init = LUA_NOREF;
+    int description = LUA_NOREF;
+    int total = LUA_NOREF;
+    int update = LUA_NOREF;
+    int done = LUA_NOREF;
+};
+
+void CallLua(lua_State* L, luaref refMgr, int ref, int nargs, int nresults = 0) {
+    int base = lua_gettop(L) - nargs;
+    luaref_get(refMgr, L, ref);
+    lua_insert(L, base + 1);
+    if (lua_pcall(L, nargs, nresults, 0) != LUA_OK) {
+        lua_pop(L, 1);
+        // Keep the stack shape promised by nresults so callers that read a
+        // result see nil instead of an unrelated value.
+        for (int i = 0; i < nresults; ++i) {
+            lua_pushnil(L);
+        }
+    }
+}
+
+class LuaProgress : public ClientProgress {
+public:
+    LuaProgress(lua_State* L, luaref refMgr, const ProgressRefs& refs, int type)
+        : L_(L), refMgr_(refMgr), refs_(refs) {
+        if (refs_.init != LUA_NOREF) {
+            lua_pushinteger(L_, type);
+            CallLua(L_, refMgr_, refs_.init, 1);
+        }
+    }
+
+    void Description(const StrPtr* desc, int units) override {
+        if (refs_.description == LUA_NOREF) return;
+        const char* text = desc ? desc->Text() : "";
+        size_t length = desc ? static_cast<size_t>(desc->Length()) : 0;
+        lua_pushlstring(L_, text, length);
+        lua_pushinteger(L_, units);
+        CallLua(L_, refMgr_, refs_.description, 2);
+    }
+
+    void Total(long total) override {
+        if (refs_.total == LUA_NOREF) return;
+        lua_pushinteger(L_, total);
+        CallLua(L_, refMgr_, refs_.total, 1);
+    }
+
+    int Update(long position) override {
+        if (refs_.update != LUA_NOREF) {
+            lua_pushinteger(L_, position);
+            CallLua(L_, refMgr_, refs_.update, 1);
+        }
+        return 0;
+    }
+
+    void Done(int fail) override {
+        if (refs_.done == LUA_NOREF) return;
+        lua_pushboolean(L_, fail != 0);
+        CallLua(L_, refMgr_, refs_.done, 1);
+    }
+
+private:
+    lua_State* L_;
+    luaref refMgr_;
+    ProgressRefs refs_;
 };
 
 class TagCollector : public ClientUser {
 public:
-    TagCollector(lua_State* L, int on_stat_ref, int on_error_ref,
+    TagCollector(lua_State* L, luaref refMgr, const ProgressRefs& progress,
+                 int on_stat_ref, int on_error_ref,
                  int on_warning_ref, int on_info_ref, int on_text_ref,
                  int on_binary_ref, int on_input_ref, int on_prompt_ref)
-        : L_(L),
+        : L_(L), refMgr_(refMgr), progress_(progress),
           on_stat_ref_(on_stat_ref), on_error_ref_(on_error_ref),
           on_warning_ref_(on_warning_ref), on_info_ref_(on_info_ref),
           on_text_ref_(on_text_ref), on_binary_ref_(on_binary_ref),
           on_input_ref_(on_input_ref), on_prompt_ref_(on_prompt_ref) {
     }
 
-    ~TagCollector() override {}
+    ~TagCollector() override {
+        UnrefCallback(refMgr_, on_stat_ref_);
+        UnrefCallback(refMgr_, on_error_ref_);
+        UnrefCallback(refMgr_, on_warning_ref_);
+        UnrefCallback(refMgr_, on_info_ref_);
+        UnrefCallback(refMgr_, on_text_ref_);
+        UnrefCallback(refMgr_, on_binary_ref_);
+        UnrefCallback(refMgr_, on_input_ref_);
+        UnrefCallback(refMgr_, on_prompt_ref_);
+        UnrefCallback(refMgr_, progress_.init);
+        UnrefCallback(refMgr_, progress_.description);
+        UnrefCallback(refMgr_, progress_.total);
+        UnrefCallback(refMgr_, progress_.update);
+        UnrefCallback(refMgr_, progress_.done);
+    }
+
+    int ProgressIndicator() override {
+        return progress_.init != LUA_NOREF ||
+               progress_.description != LUA_NOREF ||
+               progress_.total != LUA_NOREF ||
+               progress_.update != LUA_NOREF ||
+               progress_.done != LUA_NOREF;
+    }
+
+    ClientProgress* CreateProgress(int type) override {
+        if (!ProgressIndicator()) return nullptr;
+        return new LuaProgress(L_, refMgr_, progress_, type);
+    }
 
     int Release(bool ok) {
         lua_pushboolean(L_, ok);
@@ -205,7 +349,9 @@ public:
             lua_pushinteger(L_, code);
             lua_pushinteger(L_, severity);
             lua_pushlstring(L_, buf.Text(), static_cast<size_t>(buf.Length()));
-        }, 3);
+            PushErrorMsgId(L_, error);
+            PushErrorDict(L_, error);
+        }, 5);
     }
 
     void Message(Error* error) override {
@@ -222,7 +368,9 @@ public:
             CallCallback(on_warning_ref_, [&]() {
                 lua_pushinteger(L_, code);
                 lua_pushlstring(L_, buf.Text(), static_cast<size_t>(buf.Length()));
-            }, 2);
+                PushErrorMsgId(L_, error);
+                PushErrorDict(L_, error);
+            }, 4);
         } else {
             if (on_error_ref_ == LUA_NOREF) return;
             int code = error->GetGeneric();
@@ -231,7 +379,9 @@ public:
                 lua_pushinteger(L_, code);
                 lua_pushinteger(L_, severity);
                 lua_pushlstring(L_, buf.Text(), static_cast<size_t>(buf.Length()));
-            }, 3);
+                PushErrorMsgId(L_, error);
+                PushErrorDict(L_, error);
+            }, 5);
         }
     }
 
@@ -278,10 +428,10 @@ public:
     void InputData(StrBuf* strbuf, Error* e) override {
         if (on_input_ref_ == LUA_NOREF) return;
         CallCallback(on_input_ref_, []() {}, 0, 1);
-        if (lua_isstring(L_, -1)) {
+        if (lua_type(L_, -1) == LUA_TSTRING) {
             size_t len = 0;
             const char* s = lua_tolstring(L_, -1, &len);
-            strbuf->Set(s);
+            strbuf->Set(s, static_cast<p4size_t>(len));
         }
         lua_pop(L_, 1);
     }
@@ -291,10 +441,10 @@ public:
         lua_pushlstring(L_, msg.Text(), static_cast<size_t>(msg.Length()));
         lua_pushboolean(L_, noEcho);
         CallCallback(on_prompt_ref_, []() {}, 2, 1);
-        if (lua_isstring(L_, -1)) {
+        if (lua_type(L_, -1) == LUA_TSTRING) {
             size_t len = 0;
             const char* s = lua_tolstring(L_, -1, &len);
-            rsp.Set(s);
+            rsp.Set(s, static_cast<p4size_t>(len));
         }
         lua_pop(L_, 1);
     }
@@ -303,15 +453,12 @@ private:
     template <typename F>
     void CallCallback(int ref, F push_args, int nargs, int nresults = 0) {
         push_args();
-        int base = lua_gettop(L_) - nargs;
-        lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
-        lua_insert(L_, base + 1);
-        if (lua_pcall(L_, nargs, nresults, 0) != LUA_OK) {
-            lua_pop(L_, 1);
-        }
+        CallLua(L_, refMgr_, ref, nargs, nresults);
     }
 
     lua_State* L_;
+    luaref refMgr_;
+    ProgressRefs progress_;
     int ok_ref_ = LUA_NOREF;
     int on_stat_ref_ = LUA_NOREF;
     int on_error_ref_ = LUA_NOREF;
@@ -349,6 +496,15 @@ class P4Client {
 public:
     explicit P4Client(lua_State* L)
         : refMgr_(luaref_init(L)), L_(L) {
+        Enviro* enviro = api_.GetEnviro();
+        if (enviro) {
+            HostEnv henv;
+            StrBuf cwd;
+            henv.GetCwd(cwd, enviro);
+            if (cwd.Length() > 0) {
+                enviro->Config(cwd);
+            }
+        }
         lua_newtable(L);
         settingsRef_ = luaref_ref(refMgr_, L);
     }
@@ -383,12 +539,11 @@ public:
     bool PushOption(lua_State* L, std::string_view key) const {
         luaref_get(refMgr_, L, settingsRef_);
         lua_pushlstring(L, key.data(), key.size());
-        lua_rawget(L, -2);
-        lua_remove(L, -2);
-        if (lua_isnil(L, -1)) {
-            lua_pop(L, 1);
+        if (lua_rawget(L, -2) == LUA_TNIL) {
+            lua_pop(L, 2);
             return false;
         }
+        lua_remove(L, -2);
         return true;
     }
 
@@ -408,7 +563,37 @@ public:
         return refMgr_;
     }
 
+    char* GetEnv(const char* name) {
+        Enviro* enviro = api_.GetEnviro();
+        return enviro ? enviro->Get(name) : nullptr;
+    }
+
+    const StrPtr& GetConfig() {
+        return api_.GetConfig();
+    }
+
+    const StrArray* GetConfigs() {
+        return api_.GetConfigs();
+    }
+
+    void SetProtocol(const char* name, const char* value) {
+        api_.SetProtocol(name, value);
+    }
+
+    StrPtr* GetProtocol(const char* name) {
+        return api_.GetProtocol(name);
+    }
+
+    Ignore* GetIgnore() {
+        return api_.GetIgnore();
+    }
+
+    const StrPtr& GetIgnoreFile() {
+        return api_.GetIgnoreFile();
+    }
+
     TagCollector* RunAsync(std::string_view command, char** argv, int argc, lua_State* L,
+                           const ProgressRefs& progress,
                            int on_stat_ref, int on_error_ref, int on_warning_ref,
                            int on_info_ref, int on_text_ref, int on_binary_ref,
                            int on_input_ref, int on_prompt_ref) {
@@ -416,7 +601,7 @@ public:
         if (!connected_ && !ConnectImpl(L)) return nullptr;
 
         api_.SetArgv(argc, argv);
-        auto* collector = new TagCollector(L,
+        auto* collector = new TagCollector(L, refMgr_, progress,
             on_stat_ref, on_error_ref, on_warning_ref,
             on_info_ref, on_text_ref, on_binary_ref,
             on_input_ref, on_prompt_ref);
@@ -430,7 +615,7 @@ public:
         return api_.GetErrors() == 0 && api_.GetFatals() == 0;
     }
 
-    bool Run(std::string_view command, char** argv, int argc, lua_State* L, int options_ref = -1) {
+    bool Run(std::string_view command, char** argv, int argc, lua_State* L, int options_ref = LUA_NOREF) {
         if (command.empty()) {
             lua_pushnil(L);
             lua_pushliteral(L, "command must not be empty");
@@ -478,7 +663,6 @@ private:
             return true;
         }
         Error p4_error;
-        api_.SetProtocol("tag", "");
         api_.Init(&p4_error);
         if (p4_error.Test()) {
             if (L) {
@@ -530,6 +714,8 @@ struct P4ClientUserData {
 struct TagUserData {
     TagCollector* collector = nullptr;
     P4Client* client = nullptr;
+    bool waited = false;
+    bool last_ok = false;
 };
 
 P4Client* CheckClient(lua_State* L, int index) {
@@ -549,7 +735,7 @@ bool ConfigureFromTable(lua_State* L, int index, P4Client* client) {
     index = lua_absindex(L, index);
     lua_pushnil(L);
     while (lua_next(L, index) != 0) {
-        if (!lua_isstring(L, -2)) {
+        if (lua_type(L, -2) != LUA_TSTRING) {
             lua_pop(L, 2);
             lua_pushnil(L);
             lua_pushliteral(L, "configuration keys must be strings");
@@ -677,21 +863,94 @@ int ClientConnected(lua_State* L) {
     return 1;
 }
 
+int ClientEnv(lua_State* L) {
+    P4Client* client = CheckClient(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+    const char* value = client->GetEnv(name);
+    if (value == nullptr) {
+        lua_pushnil(L);
+    } else {
+        lua_pushstring(L, value);
+    }
+    return 1;
+}
+
+int ClientP4ConfigFile(lua_State* L) {
+    P4Client* client = CheckClient(L, 1);
+    const StrPtr& config = client->GetConfig();
+    if (config.Length() == 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushlstring(L, config.Text(), static_cast<size_t>(config.Length()));
+    }
+    return 1;
+}
+
+int ClientP4ConfigFiles(lua_State* L) {
+    P4Client* client = CheckClient(L, 1);
+    const StrArray* configs = client->GetConfigs();
+    const int count = configs ? configs->Count() : 0;
+    lua_createtable(L, count, 0);
+    for (int i = 0; i < count; ++i) {
+        const StrBuf* entry = configs->Get(i);
+        lua_pushlstring(L, entry->Text(), static_cast<size_t>(entry->Length()));
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+int ClientProtocol(lua_State* L) {
+    P4Client* client = CheckClient(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+    if (!lua_isnoneornil(L, 3)) {
+        client->SetProtocol(name, luaL_checkstring(L, 3));
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    StrPtr* value = client->GetProtocol(name);
+    if (value == nullptr) {
+        lua_pushnil(L);
+    } else {
+        lua_pushlstring(L, value->Text(), static_cast<size_t>(value->Length()));
+    }
+    return 1;
+}
+
+int ClientIsIgnored(lua_State* L) {
+    P4Client* client = CheckClient(L, 1);
+    size_t length = 0;
+    const char* path = luaL_checklstring(L, 2, &length);
+    bool ignored = false;
+    if (Ignore* ignore = client->GetIgnore()) {
+        StrRef ref(path, static_cast<p4size_t>(length));
+        ignored = ignore->Reject(ref, client->GetIgnoreFile()) != 0;
+    }
+    lua_pushboolean(L, ignored);
+    return 1;
+}
+
 int ClientRun(lua_State* L) {
     P4Client* client = CheckClient(L, 1);
     const char* command = luaL_checkstring(L, 2);
 
+    const bool has_options = !lua_isnoneornil(L, 4);
+    if (has_options) {
+        luaL_checktype(L, 4, LUA_TTABLE);
+    }
+
     int argc = 0;
     char** argv = ParseArguments(L, 3, &argc);
 
-    int options_ref = -1;
-    if (!lua_isnoneornil(L, 4)) {
-        luaL_checktype(L, 4, LUA_TTABLE);
+    int options_ref = LUA_NOREF;
+    if (has_options) {
         lua_pushvalue(L, 4);
         options_ref = luaref_ref(client->GetRefMgr(), L);
     }
 
     if (!client->Run(command, argv, argc, L, options_ref)) {
+        if (options_ref != LUA_NOREF) {
+            luaref_unref(client->GetRefMgr(), options_ref);
+        }
         delete[] argv;
         return 2;
     }
@@ -718,13 +977,24 @@ int TagWait(lua_State* L) {
     TagCollector* collector = ud->collector;
     P4Client* client = ud->client;
     if (!collector) return 0;
+    if (ud->waited) {
+        lua_pushboolean(L, ud->last_ok);
+        return 1;
+    }
 
     bool ok = client->WaitTag(collector);
+    ud->waited = true;
+    ud->last_ok = ok;
     return collector->Release(ok);
 }
 
 int TagGc(lua_State* L) {
     auto* ud = static_cast<TagUserData*>(luaL_checkudata(L, 1, kTagMetatable));
+    if (ud->collector && !ud->waited) {
+        // Do not free the collector while RunTag may still be using it.
+        ud->client->WaitTag(ud->collector);
+        ud->waited = true;
+    }
     delete ud->collector;
     ud->collector = nullptr;
     ud->client = nullptr;
@@ -733,22 +1003,37 @@ int TagGc(lua_State* L) {
 
 int ClientRunAsync(lua_State* L) {
     P4Client* client = CheckClient(L, 1);
+    luaref refMgr = client->GetRefMgr();
     const char* command = luaL_checkstring(L, 2);
+
+    if (command[0] == '\0') {
+        lua_pushnil(L);
+        lua_pushliteral(L, "command must not be empty");
+        return 2;
+    }
+
+    const bool has_callbacks = !lua_isnoneornil(L, 4);
+    if (has_callbacks) {
+        luaL_checktype(L, 4, LUA_TTABLE);
+    }
 
     int argc = 0;
     char** argv = ParseArguments(L, 3, &argc);
 
     int on_stat = LUA_NOREF, on_error = LUA_NOREF, on_warn = LUA_NOREF, on_info = LUA_NOREF;
     int on_text = LUA_NOREF, on_bin = LUA_NOREF, on_input = LUA_NOREF, on_prompt = LUA_NOREF;
-    if (!lua_isnoneornil(L, 4)) {
-        luaL_checktype(L, 4, LUA_TTABLE);
+    ProgressRefs progress;
+    if (has_callbacks) {
         auto get_cb = [&](const char* name) -> int {
-            lua_getfield(L, 4, name);
-            if (lua_isfunction(L, -1)) {
-                return luaL_ref(L, LUA_REGISTRYINDEX);
+            if (lua_getfield(L, 4, name) != LUA_TFUNCTION) {
+                lua_pop(L, 1);
+                return LUA_NOREF;
             }
-            lua_pop(L, 1);
-            return LUA_NOREF;
+            int ref = luaref_ref(refMgr, L);
+            if (ref == LUA_NOREF) {
+                lua_pop(L, 1);
+            }
+            return ref;
         };
         on_stat   = get_cb("on_stat");
         on_error  = get_cb("on_error");
@@ -758,21 +1043,42 @@ int ClientRunAsync(lua_State* L) {
         on_bin    = get_cb("on_binary");
         on_input  = get_cb("on_input");
         on_prompt = get_cb("on_prompt");
+        progress.init        = get_cb("on_progress_init");
+        progress.description = get_cb("on_progress_description");
+        progress.total       = get_cb("on_progress_total");
+        progress.update      = get_cb("on_progress_update");
+        progress.done        = get_cb("on_progress_done");
     }
 
-    auto* collector = client->RunAsync(command, argv, argc, L,
+    auto* collector = client->RunAsync(command, argv, argc, L, progress,
         on_stat, on_error, on_warn, on_info, on_text, on_bin, on_input, on_prompt);
     delete[] argv;
 
     if (!collector) {
-        lua_pushnil(L);
-        lua_pushliteral(L, "failed to start async command");
+        UnrefCallback(refMgr, on_stat);
+        UnrefCallback(refMgr, on_error);
+        UnrefCallback(refMgr, on_warn);
+        UnrefCallback(refMgr, on_info);
+        UnrefCallback(refMgr, on_text);
+        UnrefCallback(refMgr, on_bin);
+        UnrefCallback(refMgr, on_input);
+        UnrefCallback(refMgr, on_prompt);
+        UnrefCallback(refMgr, progress.init);
+        UnrefCallback(refMgr, progress.description);
+        UnrefCallback(refMgr, progress.total);
+        UnrefCallback(refMgr, progress.update);
+        UnrefCallback(refMgr, progress.done);
+        // ConnectImpl has already pushed (nil, error); return it to the caller.
         return 2;
     }
 
-    auto* ud = static_cast<TagUserData*>(lua_newuserdatauv(L, sizeof(TagUserData), 0));
+    auto* ud = static_cast<TagUserData*>(lua_newuserdatauv(L, sizeof(TagUserData), 1));
     ud->collector = collector;
     ud->client = client;
+    ud->waited = false;
+    ud->last_ok = false;
+    lua_pushvalue(L, 1);
+    lua_setiuservalue(L, -2, 1);
     if (luaL_newmetatable(L, kTagMetatable)) {
         lua_pushcfunction(L, TagGc);
         lua_setfield(L, -2, "__gc");
@@ -784,6 +1090,176 @@ int ClientRunAsync(lua_State* L) {
         lua_setfield(L, -2, "__index");
     }
     lua_setmetatable(L, -2);
+    return 1;
+}
+
+constexpr char kMapMetatable[] = "p4.map";
+
+struct P4MapUserData {
+    MapApi* map = nullptr;
+};
+
+MapApi* CheckMap(lua_State* L, int index) {
+    auto* ud = static_cast<P4MapUserData*>(luaL_checkudata(L, index, kMapMetatable));
+    luaL_argcheck(L, ud->map != nullptr, index, "p4 map is closed");
+    return ud->map;
+}
+
+MapDir GetDirection(lua_State* L, int index) {
+    lua_Integer direction = luaL_optinteger(L, index, MapLeftRight);
+    luaL_argcheck(L, direction == MapLeftRight || direction == MapRightLeft,
+                  index, "invalid map direction");
+    return static_cast<MapDir>(direction);
+}
+
+P4MapUserData* NewMapUserdata(lua_State* L, MapApi* map);
+
+int MapInsert(lua_State* L);
+int MapTranslate(lua_State* L);
+int MapTranslateArray(lua_State* L);
+int MapReverse(lua_State* L);
+int MapJoin(lua_State* L);
+int MapEntries(lua_State* L);
+int MapCount(lua_State* L);
+int MapClear(lua_State* L);
+
+int MapGc(lua_State* L) {
+    auto* ud = static_cast<P4MapUserData*>(luaL_checkudata(L, 1, kMapMetatable));
+    delete ud->map;
+    ud->map = nullptr;
+    return 0;
+}
+
+int MapInsert(lua_State* L) {
+    MapApi* map = CheckMap(L, 1);
+    size_t leftLength = 0;
+    size_t rightLength = 0;
+    const char* left = luaL_checklstring(L, 2, &leftLength);
+    const char* right = luaL_checklstring(L, 3, &rightLength);
+    lua_Integer type = luaL_optinteger(L, 4, MapInclude);
+    luaL_argcheck(L, type >= MapInclude && type <= MapOneToMany, 4, "invalid map type");
+    map->Insert(StrRef(left, static_cast<p4size_t>(leftLength)),
+                StrRef(right, static_cast<p4size_t>(rightLength)),
+                static_cast<MapType>(type));
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+int MapTranslate(lua_State* L) {
+    MapApi* map = CheckMap(L, 1);
+    size_t length = 0;
+    const char* text = luaL_checklstring(L, 2, &length);
+    StrRef from(text, static_cast<p4size_t>(length));
+    StrBuf to;
+    if (map->Translate(from, to, GetDirection(L, 3))) {
+        lua_pushlstring(L, to.Text(), to.Length());
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+int MapTranslateArray(lua_State* L) {
+    MapApi* map = CheckMap(L, 1);
+    size_t length = 0;
+    const char* text = luaL_checklstring(L, 2, &length);
+    StrRef from(text, static_cast<p4size_t>(length));
+    StrArray to;
+    if (!map->Translate(from, to, GetDirection(L, 3))) {
+        lua_pushnil(L);
+        return 1;
+    }
+    const int count = to.Count();
+    lua_createtable(L, count, 0);
+    for (int i = 0; i < count; ++i) {
+        const StrBuf* value = to.Get(i);
+        lua_pushlstring(L, value->Text(), value->Length());
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+int MapReverse(lua_State* L) {
+    MapApi* map = CheckMap(L, 1);
+    auto* reversed = new MapApi;
+    for (int i = 0; i < map->Count(); ++i) {
+        reversed->Insert(*map->GetRight(i), *map->GetLeft(i), map->GetType(i));
+    }
+    NewMapUserdata(L, reversed);
+    return 1;
+}
+
+int MapJoin(lua_State* L) {
+    MapApi* left = CheckMap(L, 1);
+    MapApi* right = CheckMap(L, 2);
+    MapApi* joined = MapApi::Join(left, right);
+    if (!joined) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "failed to join maps");
+        return 2;
+    }
+    NewMapUserdata(L, joined);
+    return 1;
+}
+
+int MapEntries(lua_State* L) {
+    MapApi* map = CheckMap(L, 1);
+    const int count = map->Count();
+    lua_createtable(L, count, 0);
+    for (int i = 0; i < count; ++i) {
+        const StrPtr* left = map->GetLeft(i);
+        const StrPtr* right = map->GetRight(i);
+        lua_createtable(L, 0, 3);
+        lua_pushlstring(L, left->Text(), left->Length());
+        lua_setfield(L, -2, "left");
+        lua_pushlstring(L, right->Text(), right->Length());
+        lua_setfield(L, -2, "right");
+        lua_pushinteger(L, map->GetType(i));
+        lua_setfield(L, -2, "type");
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+int MapCount(lua_State* L) {
+    lua_pushinteger(L, CheckMap(L, 1)->Count());
+    return 1;
+}
+
+int MapClear(lua_State* L) {
+    CheckMap(L, 1)->Clear();
+    return 0;
+}
+
+P4MapUserData* NewMapUserdata(lua_State* L, MapApi* map) {
+    auto* ud = static_cast<P4MapUserData*>(lua_newuserdatauv(L, sizeof(P4MapUserData), 0));
+    ud->map = map;
+    if (luaL_newmetatable(L, kMapMetatable)) {
+        lua_pushcfunction(L, MapGc);
+        lua_setfield(L, -2, "__gc");
+        luaL_Reg methods[] = {
+            {"insert", MapInsert},
+            {"translate", MapTranslate},
+            {"translate_array", MapTranslateArray},
+            {"reverse", MapReverse},
+            {"join", MapJoin},
+            {"entries", MapEntries},
+            {"count", MapCount},
+            {"clear", MapClear},
+            {nullptr, nullptr},
+        };
+        luaL_newlib(L, methods);
+        lua_setfield(L, -2, "__index");
+    }
+    lua_setmetatable(L, -2);
+    return ud;
+}
+
+int ModuleMap(lua_State* L) {
+    if (lua_gettop(L) != 0) {
+        return luaL_error(L, "p4.map expects no arguments");
+    }
+    NewMapUserdata(L, new MapApi());
     return 1;
 }
 
@@ -800,11 +1276,18 @@ int ModuleNew(lua_State* L) {
     if (luaL_newmetatable(L, kClientMetatable)) {
         lua_pushcfunction(L, ClientGc);
         lua_setfield(L, -2, "__gc");
+        lua_pushcfunction(L, ClientClose);
+        lua_setfield(L, -2, "__close");
 
         luaL_Reg methods[] = {
             {"close", ClientClose},
             {"connect", ClientConnect},
             {"connected", ClientConnected},
+            {"env", ClientEnv},
+            {"is_ignored", ClientIsIgnored},
+            {"p4config_file", ClientP4ConfigFile},
+            {"p4config_files", ClientP4ConfigFiles},
+            {"protocol", ClientProtocol},
             {"run", ClientRun},
             {"run_async", ClientRunAsync},
             {nullptr, nullptr},
@@ -839,8 +1322,21 @@ int ModuleNew(lua_State* L) {
 P4LUA_EXPORT int luaopen_p4(lua_State* L) {
     luaL_Reg libs[] = {
         {"new", ModuleNew},
+        {"map", ModuleMap},
         {nullptr, nullptr},
     };
     luaL_newlib(L, libs);
+    lua_pushinteger(L, MapInclude);
+    lua_setfield(L, -2, "MAP_INCLUDE");
+    lua_pushinteger(L, MapExclude);
+    lua_setfield(L, -2, "MAP_EXCLUDE");
+    lua_pushinteger(L, MapOverlay);
+    lua_setfield(L, -2, "MAP_OVERLAY");
+    lua_pushinteger(L, MapOneToMany);
+    lua_setfield(L, -2, "MAP_ONE_TO_MANY");
+    lua_pushinteger(L, MapLeftRight);
+    lua_setfield(L, -2, "MAP_LEFT_RIGHT");
+    lua_pushinteger(L, MapRightLeft);
+    lua_setfield(L, -2, "MAP_RIGHT_LEFT");
     return 1;
 }

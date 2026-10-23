@@ -17,7 +17,13 @@ local client = assert(p4.new {
     prog     = "p4.lua example/info",
 })
 
-local result = client:run("info")
+assert(client:protocol("tag", ""))
+local result, run_err = client:run("info")
+if not result then
+    io.stderr:write(("info failed: %s\n"):format(run_err))
+    client:close()
+    return
+end
 if result.errors then
     for _, e in ipairs(result.errors) do
         io.stderr:write(("[%d] %s\n"):format(e.code, e.message))

@@ -42,8 +42,10 @@ assert(client, err)
 local result, run_err = client:run("info")
 assert(result, run_err)
 
-print(result.ok)
-print(result.error_count)
+-- 无错误时 result.errors 为 nil
+if result.errors then
+    print(#result.errors, result.errors[1].message)
+end
 ```
 
 更完整的示例见：

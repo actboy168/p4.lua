@@ -17,18 +17,24 @@ if not client then
     return
 end
 
+assert(client:protocol("tag", ""))
 local args = {}
-local labels = client:run("labels", args)
-if not labels.ok then
+local labels, run_err = client:run("labels", args)
+if not labels then
+    io.stderr:write(("labels failed: %s\n"):format(run_err))
+    client:close()
+    return
+end
+if labels.errors then
     io.stderr:write("labels query failed\n")
     client:close()
     return
 end
 
-for _, lb in ipairs(labels.stats) do
+for _, lb in ipairs(labels.stats or {}) do
     local desc = (lb.Description or ""):gsub("\n$", "")
     print(("  %-25s %s"):format(lb.label, desc))
 end
 
-print(("\nTotal: %d labels"):format(#labels.stats))
+print(("\nTotal: %d labels"):format(#(labels.stats or {})))
 client:close()
