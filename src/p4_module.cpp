@@ -58,6 +58,34 @@ void PushErrorDict(lua_State* L, Error* error) {
     }
 }
 
+void PushErrorIds(lua_State* L, Error* error) {
+    int count = error ? error->GetErrorCount() : 0;
+    if (count <= 0) {
+        lua_pushnil(L);
+        return;
+    }
+    lua_createtable(L, count, 0);
+    for (int index = 0; index < count; ++index) {
+        ErrorId* id = error->GetId(index);
+        if (!id) continue;
+        lua_createtable(L, 0, 8);
+        lua_pushinteger(L, id->code); lua_setfield(L, -2, "code");
+        lua_pushinteger(L, id->UniqueCode()); lua_setfield(L, -2, "msgid");
+        lua_pushinteger(L, id->Generic()); lua_setfield(L, -2, "generic");
+        lua_pushinteger(L, id->Severity()); lua_setfield(L, -2, "severity");
+        lua_pushinteger(L, id->Subsystem()); lua_setfield(L, -2, "subsystem");
+        lua_pushinteger(L, id->SubCode()); lua_setfield(L, -2, "subcode");
+        lua_pushinteger(L, id->ArgCount()); lua_setfield(L, -2, "args");
+        if (id->fmt) {
+            lua_pushstring(L, id->fmt);
+        } else {
+            lua_pushnil(L);
+        }
+        lua_setfield(L, -2, "fmt");
+        lua_rawseti(L, -2, index + 1);
+    }
+}
+
 class ResultCollector : public ClientUser {
 public:
     explicit ResultCollector(lua_State* L, luaref refMgr, int options_ref = LUA_NOREF)
@@ -91,27 +119,11 @@ public:
     }
 
     void HandleError(Error* error) override {
-        auto buf = FormatError(*error);
-        EnsureField("errors");
-        PushError(error, buf.Text(), static_cast<size_t>(buf.Length()));
-        Append();
+        HandleMessage(error);
     }
 
     void Message(Error* error) override {
-        auto buf = FormatError(*error);
-        if (error->IsInfo()) {
-            EnsureField("info");
-            PushInfo(0, buf.Text(), static_cast<size_t>(buf.Length()));
-            Append();
-        } else if (error->IsWarning()) {
-            EnsureField("warnings");
-            PushError(error, buf.Text(), static_cast<size_t>(buf.Length()));
-            Append();
-        } else {
-            EnsureField("errors");
-            PushError(error, buf.Text(), static_cast<size_t>(buf.Length()));
-            Append();
-        }
+        HandleMessage(error);
     }
 
     void OutputError(const char* error_buffer) override {
@@ -176,6 +188,27 @@ public:
     }
 
 private:
+    void HandleMessage(Error* error) {
+        auto buf = FormatError(*error);
+        size_t length = static_cast<size_t>(buf.Length());
+        if (error->IsInfo()) {
+            EnsureField("info");
+            PushInfo(0, buf.Text(), length);
+            Append();
+            AppendMessage(error, buf.Text(), length, 0);
+        } else if (error->IsWarning()) {
+            EnsureField("warnings");
+            PushMessage(error, buf.Text(), length);
+            Append();
+            AppendMessage(error, buf.Text(), length);
+        } else {
+            EnsureField("errors");
+            PushMessage(error, buf.Text(), length);
+            Append();
+            AppendMessage(error, buf.Text(), length);
+        }
+    }
+
     void PushResult() {
         luaref_get(refMgr_, L_, ref_);
     }
@@ -197,14 +230,24 @@ private:
         lua_pop(L_, 1);
     }
 
-    void PushError(Error* error, const char* msg, size_t len) {
+    void PushMessage(Error* error, const char* msg, size_t len, int level = -1) {
         while (len > 0 && msg[len - 1] == '\n') --len;
-        lua_createtable(L_, 0, 5);
+        lua_createtable(L_, 0, 7);
         lua_pushinteger(L_, error->GetGeneric()); lua_setfield(L_, -2, "code");
         lua_pushinteger(L_, error->GetSeverity()); lua_setfield(L_, -2, "severity");
         lua_pushlstring(L_, msg, len); lua_setfield(L_, -2, "message");
+        if (level >= 0) {
+            lua_pushinteger(L_, level); lua_setfield(L_, -2, "level");
+        }
         PushErrorMsgId(L_, error); lua_setfield(L_, -2, "msgid");
         PushErrorDict(L_, error); lua_setfield(L_, -2, "dict");
+        PushErrorIds(L_, error); lua_setfield(L_, -2, "ids");
+    }
+
+    void AppendMessage(Error* error, const char* msg, size_t len, int level = -1) {
+        EnsureField("messages");
+        PushMessage(error, msg, len, level);
+        Append();
     }
 
     void PushInfo(int level, const char* msg, size_t len) {
@@ -340,49 +383,14 @@ public:
         return 1;
     }
 
+    bool Failed() const { return failed_; }
+
     void HandleError(Error* error) override {
-        if (on_error_ref_ == LUA_NOREF) return;
-        int code = error->GetGeneric();
-        int severity = error->GetSeverity();
-        auto buf = FormatError(*error);
-        CallCallback(on_error_ref_, [&]() {
-            lua_pushinteger(L_, code);
-            lua_pushinteger(L_, severity);
-            lua_pushlstring(L_, buf.Text(), static_cast<size_t>(buf.Length()));
-            PushErrorMsgId(L_, error);
-            PushErrorDict(L_, error);
-        }, 5);
+        HandleMessage(error);
     }
 
     void Message(Error* error) override {
-        auto buf = FormatError(*error);
-        if (error->IsInfo()) {
-            if (on_info_ref_ == LUA_NOREF) return;
-            CallCallback(on_info_ref_, [&]() {
-                lua_pushinteger(L_, 0);
-                lua_pushlstring(L_, buf.Text(), static_cast<size_t>(buf.Length()));
-            }, 2);
-        } else if (error->IsWarning()) {
-            if (on_warning_ref_ == LUA_NOREF) return;
-            int code = error->GetGeneric();
-            CallCallback(on_warning_ref_, [&]() {
-                lua_pushinteger(L_, code);
-                lua_pushlstring(L_, buf.Text(), static_cast<size_t>(buf.Length()));
-                PushErrorMsgId(L_, error);
-                PushErrorDict(L_, error);
-            }, 4);
-        } else {
-            if (on_error_ref_ == LUA_NOREF) return;
-            int code = error->GetGeneric();
-            int severity = error->GetSeverity();
-            CallCallback(on_error_ref_, [&]() {
-                lua_pushinteger(L_, code);
-                lua_pushinteger(L_, severity);
-                lua_pushlstring(L_, buf.Text(), static_cast<size_t>(buf.Length()));
-                PushErrorMsgId(L_, error);
-                PushErrorDict(L_, error);
-            }, 5);
-        }
+        HandleMessage(error);
     }
 
     void OutputError(const char* error_buffer) override {
@@ -394,7 +402,11 @@ public:
         CallCallback(on_info_ref_, [&]() {
             lua_pushinteger(L_, static_cast<int>(level));
             lua_pushlstring(L_, s, strlen(s));
-        }, 2);
+            lua_pushnil(L_);
+            lua_pushnil(L_);
+            lua_pushnil(L_);
+            lua_pushboolean(L_, 0);
+        }, 6);
     }
 
     void OutputBinary(const char* data, int length) override {
@@ -450,6 +462,45 @@ public:
     }
 
 private:
+    void HandleMessage(Error* error) {
+        if (error->IsError()) failed_ = true;
+        auto buf = FormatError(*error);
+        size_t length = static_cast<size_t>(buf.Length());
+        if (error->IsInfo()) {
+            if (on_info_ref_ == LUA_NOREF) return;
+            CallCallback(on_info_ref_, [&]() {
+                lua_pushinteger(L_, 0);
+                lua_pushlstring(L_, buf.Text(), length);
+                PushErrorMsgId(L_, error);
+                PushErrorDict(L_, error);
+                PushErrorIds(L_, error);
+                lua_pushboolean(L_, 1);
+            }, 6);
+        } else if (error->IsWarning()) {
+            if (on_warning_ref_ == LUA_NOREF) return;
+            int code = error->GetGeneric();
+            CallCallback(on_warning_ref_, [&]() {
+                lua_pushinteger(L_, code);
+                lua_pushlstring(L_, buf.Text(), length);
+                PushErrorMsgId(L_, error);
+                PushErrorDict(L_, error);
+                PushErrorIds(L_, error);
+            }, 5);
+        } else {
+            if (on_error_ref_ == LUA_NOREF) return;
+            int code = error->GetGeneric();
+            int severity = error->GetSeverity();
+            CallCallback(on_error_ref_, [&]() {
+                lua_pushinteger(L_, code);
+                lua_pushinteger(L_, severity);
+                lua_pushlstring(L_, buf.Text(), length);
+                PushErrorMsgId(L_, error);
+                PushErrorDict(L_, error);
+                PushErrorIds(L_, error);
+            }, 6);
+        }
+    }
+
     template <typename F>
     void CallCallback(int ref, F push_args, int nargs, int nresults = 0) {
         push_args();
@@ -468,6 +519,7 @@ private:
     int on_binary_ref_ = LUA_NOREF;
     int on_input_ref_ = LUA_NOREF;
     int on_prompt_ref_ = LUA_NOREF;
+    bool failed_ = false;
 };
 
 struct OptionDef {
@@ -611,8 +663,11 @@ public:
 
     bool WaitTag(TagCollector* collector) {
         api_.WaitTag(collector);
-        if (api_.Dropped()) connected_ = false;
-        return api_.GetErrors() == 0 && api_.GetFatals() == 0;
+        const bool dropped = api_.Dropped();
+        if (dropped) connected_ = false;
+        // ClientApi::GetErrors() counts warnings; only severity >= E_FAILED
+        // means the command failed.
+        return !collector->Failed() && !dropped;
     }
 
     bool Run(std::string_view command, char** argv, int argc, lua_State* L, int options_ref = LUA_NOREF) {

@@ -198,11 +198,12 @@ end
 - `errors`：错误输出（无错误时为 `nil`）
 - `warnings`：警告输出
 - `info`：普通信息输出
+- `messages`：按到达顺序的 info/warning/error 消息
 - `text`：文本输出
 - `binary`：二进制输出
 - `stats`：tagged / stat 类输出（需先调用 `client:protocol("tag", "")`）
 
-`errors` / `warnings` 的条目包含 `code`（generic `EV_*`）、`severity`、`message`、`msgid`（稳定消息 ID，可能为 `nil`）和 `dict`（消息参数，可能为 `nil`）。分类用 `msgid` / `code`，不要匹配 `message`。
+`errors` / `warnings` 的条目包含 `code`（generic `EV_*`）、`severity`、`message`、`msgid`（稳定消息 ID，可能为 `nil`）、`dict`（消息参数，可能为 `nil`）和 `ids`（所有分层 `ErrorId`，可能为 `nil`）。`messages` 使用相同结构，并按消息到达顺序记录。分类用 `msgid` / `ids`，不要匹配 `message`。
 
 成功判断：`result.errors == nil`。
 

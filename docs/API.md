@@ -157,9 +157,9 @@ tag:wait()
 | 回调 | 参数 | 说明 |
 |---|---|---|
 | `on_stat` | `(stat)` | 每个 tagged 记录 |
-| `on_error` | `(code, severity, msg, msgid, dict)` | 即时错误 |
-| `on_warning` | `(code, msg, msgid, dict)` | 即时警告 |
-| `on_info` | `(level, data)` | 信息消息 |
+| `on_error` | `(code, severity, msg, msgid, dict, ids)` | 即时错误 |
+| `on_warning` | `(code, msg, msgid, dict, ids)` | 即时警告 |
+| `on_info` | `(level, data, msgid, dict, ids, is_message)` | 信息消息；`is_message` 区分 `ClientUser::Message` 和普通 `OutputInfo` |
 | `on_text` | `(text)` | 文本输出 |
 | `on_binary` | `(data)` | 二进制输出 |
 | `on_input` | `() → return "spec"` | spec 表单输入 |
@@ -174,7 +174,7 @@ Progress 回调只用于 `run_async`；`run()` 不提供进度。不传任何 `o
 
 ### `tag:wait()`
 
-等待异步命令完成。返回 `true`（成功）或 `false`（失败）。
+等待异步命令完成。返回 `true`（成功）或 `false`（失败）。只有 severity >= 3 的错误/致命消息算失败；warning 不会让 `wait()` 返回 `false`。
 
 应在丢弃 tag 前调用 `wait()`。如果未等待就让 tag 被 GC，`__gc` 会先等待命令结束再释放，可能阻塞；重复调用返回第一次的结果。
 
@@ -186,9 +186,10 @@ Progress 回调只用于 `run_async`；`run()` 不提供进度。不传任何 `o
 
 ```lua
 {
-    errors   = {},  -- { code, severity, message, msgid, dict }[]  (severity 3=error, 4=fatal)
-    warnings = {},  -- { code, severity=2, message, msgid, dict }[]
+    errors   = {},  -- { code, severity, message, msgid, dict, ids }[]  (severity 3=error, 4=fatal)
+    warnings = {},  -- { code, severity=2, message, msgid, dict, ids }[]
     info     = {},  -- { level, data }[]
+    messages = {},  -- 按到达顺序的 info/warning/error 消息
     text     = {},  -- string[]
     binary   = {},  -- string[]
     stats    = {},  -- table[]  tagged 结构化输出
@@ -204,10 +205,13 @@ Progress 回调只用于 `run_async`；`run()` 不提供进度。不传任何 `o
 | `code` | generic 错误码（`errornum.h` 的 `EV_*`），表示错误大类 |
 | `severity` | `1=info, 2=warning, 3=failed, 4=fatal` |
 | `message` | 格式化后的文本；受 `P4LANGUAGE` 影响，不要用它做分类 |
-| `msgid` | 第一条错误项的 `ErrorId::UniqueCode()`；跨语言稳定的消息 ID，可能为 `nil` |
+| `msgid` | `GetId(0)` 的 `ErrorId::UniqueCode()`；跨语言稳定的消息 ID，可能为 `nil` |
 | `dict` | 消息参数表（`Error::GetDict()`）；没有参数时为 `nil` |
+| `ids` | 所有分层 `ErrorId` 的数组；每项含 `code`（完整 ErrorId）、`msgid`、`generic`、`severity`、`subsystem`、`subcode`、`args`、`fmt`，可能为 `nil` |
 
-分类应使用 `msgid`（或 `code`）；`message` 只用于展示。例如：
+`messages` 与 `errors`/`warnings` 使用相同条目结构；`info` 来源的条目还带 `level`。它只记录 `ClientUser::HandleError` / `ClientUser::Message` 的消息，不包含 `OutputInfo` 的普通输出。
+
+分类应使用 `msgid`（或 `ids` 中的条目）；`message` 只用于展示。例如：
 
 ```lua
 local MSG_NO_SUCH_FILE = 0x1977
