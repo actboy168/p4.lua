@@ -109,14 +109,14 @@ print(client.port)
 | `client:env(name)` | 读取合并后的 P4 环境值（包括 `P4CONFIG`）；未设置返回 `nil` |
 | `client:p4config_file()` | 当前 `P4CONFIG` 值或文件路径；没有时返回 `nil` |
 | `client:p4config_files()` | 已加载的配置文件列表（可能为空表） |
-| `client:protocol(name[, value])` | 读取协议值（不存在时 `nil`）；传 `value` 时设置并返回 `true` |
+| `client:protocol(name[, value])` | 读取协议值（不存在时 `nil`）；传 `value` 时设置并返回 `true`（不校验服务端是否支持） |
 | `client:is_ignored(path)` | 路径是否命中 P4 ignore 规则，返回布尔值 |
 
 说明：
 
 - `env()` 读取的是环境层，不代表显式属性（`client.port` 等）的最终值；它和连接共用同一个 `Enviro`，修改 `cwd` 会重新加载环境。
 - `p4config_file()` / `p4config_files()` 反映当前 `cwd` 下已加载的配置。
-- `protocol` 可读写，包括 `tag`；协议值应在首次 `run` / `connect` 前设置，连接后设置可能不生效。改 `tag` 会导致 `result.stats` 缺失，由使用者负责。
+- `protocol` 可读写，包括 `tag`；setter 总是返回 `true`，只写本地协议缓冲，不代表服务器支持；getter 读取本地缓存。协议值应在首次 `run` / `connect` 前设置，连接后设置可能不生效。改 `tag` 会导致 `result.stats` 缺失，由使用者负责。
 - `is_ignored` 的路径原样传入，建议传绝对路径。
 - `cwd` 赋值只调用 `ClientApi::SetCwd`，由 SDK 重新加载 `P4CONFIG`，绑定不做额外处理。
 - 不提供 `set_env` / `set_var`；连接配置请使用 `port` / `user` / `client` 等属性。
@@ -147,7 +147,7 @@ local r = client:run("login", {}, { prompt = "password" })
 `input` 可以是 string 或 table：
 
 - string 原样作为 form / stdin。
-- table 使用服务器 `specdef` + SDK `Spec` 自动格式化；需要先启用 `specstring` 协议（`p4sdk.connect` 会自动启用）。
+- table 使用服务器 `specdef` + SDK `Spec` 自动格式化；需要先启用 `specstring` 协议，绑定不会自动开启。
 - table 只映射 `specdef` 中定义的字段；未知 key 会被忽略。
 - `options.input` 不是 table/string 时不会自动转换。
 

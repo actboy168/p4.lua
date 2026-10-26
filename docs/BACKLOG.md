@@ -10,10 +10,10 @@
 
 已完成：
 
-- `run` / `exec` / `try_exec` / `run_async` 的 `options.input` 支持 Lua 表；
+- `client:run` / `client:run_async` 的 `options.input` / `on_input` 支持 Lua 表；
   由 binding 使用服务器 `specdef` + `Spec` / `SpecDataTable` 自动生成 form。
 - 支持标量、list 字段（`View` / `AltRoots` / `ChangeView`）和多行 text（`Description`）。
-- `p4sdk.connect` 启用 `specstring`，因此 `client -i`、`change -i` 等命令可直接传表。
+- 首次连接前启用 `specstring` 后，`client -i`、`change -i` 等命令可直接传表。
 
 待实现：
 
